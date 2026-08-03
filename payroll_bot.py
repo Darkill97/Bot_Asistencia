@@ -1,24 +1,27 @@
 import os
-import pytesseract
+import requests
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
-from PIL import Image
 import pandas as pd
 from datetime import datetime, timedelta
-import io
 
-TOKEN = os.getenv("TOKEN") # Lee el token de Render
+TOKEN = os.getenv("TOKEN")
+OCR_API_KEY = "helloworld" # API gratis de ocr.space
 DB_FILE = "asistencia.xlsx"
 
-# *1. TARIFAS*
 TARIFA_NORMAL = 721.17
-TARIFA_TIME_HALF = 721.17 * 1.5 # $1,081.76
-TARIFA_BH = 721.17 * 0.5 # $360.59
+TARIFA_TIME_HALF = 721.17 * 1.5
+TARIFA_BH = 721.17 * 0.5
 HORAS_TURNO_NORMAL = 8
 
 async def leer_foto(file_path):
-    img = Image.open(file_path)
-    texto = pytesseract.image_to_string(img, lang='spa+eng')
+    # Subir foto a ocr.space
+    with open(file_path, "rb") as f:
+        r = requests.post('https://api.ocr.space/parse/image',
+                          files={"filename": f},
+                          data={"apikey": OCR_API_KEY, "language": "eng"})
+
+    texto = r.json()["ParsedResults"][0]["ParsedText"]
 
     datos = {'nombre': '', 'uid': '', 'fecha': '', 'hora': '', 'estado': ''}
     for linea in texto.split('\n'):
@@ -36,9 +39,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await photo_file.download_to_drive(file_path)
 
         datos = await leer_foto(file_path)
-        os.remove(file_path) # borra la foto temporal
+        os.remove(file_path)
 
-        # Guardar marcación
         df_nuevo = pd.DataFrame([datos])
         try:
             df = pd.read_excel(DB_FILE)
@@ -54,8 +56,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def calcular_pago_semana(uid, df_semana):
     total_normal = 0
     total_extra = 0
-    total_bh = 0
-
     for fecha in df_semana['fecha'].unique():
         marcaciones = df_semana[df_semana['fecha'] == fecha].sort_values('hora')
         if len(marcaciones) >= 2:
@@ -63,46 +63,35 @@ def calcular_pago_semana(uid, df_semana):
                 entrada = datetime.strptime(marcaciones.iloc[0]['hora'], '%I:%M %p')
                 salida = datetime.strptime(marcaciones.iloc[-1]['hora'], '%I:%M %p')
                 horas_trabajadas = (salida - entrada).seconds / 3600
-
                 if horas_trabajadas > HORAS_TURNO_NORMAL:
                     extra = horas_trabajadas - HORAS_TURNO_NORMAL
                     normal = HORAS_TURNO_NORMAL
                 else:
                     normal = horas_trabajadas
                     extra = 0
-
                 if "Overtime" in marcaciones['estado'].values:
                     total_extra += extra
                 else:
                     total_normal += normal
             except:
                 continue
-
     pago_normal = total_normal * TARIFA_NORMAL
     pago_extra = total_extra * TARIFA_TIME_HALF
-    pago_bh = total_bh * TARIFA_BH
-
     return {
         'Horas Normales': round(total_normal, 2),
         'Horas Extra 1.5x': round(total_extra, 2),
-        'Horas BH 0.5x': round(total_bh, 2),
         'Pago Normal': round(pago_normal, 2),
         'Pago Extra': round(pago_extra, 2),
-        'Pago BH': round(pago_bh, 2),
-        'TOTAL PAGO': round(pago_normal + pago_extra + pago_bh, 2)
+        'TOTAL PAGO': round(pago_normal + pago_extra, 2)
     }
 
 async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         df = pd.read_excel(DB_FILE)
         df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%m/%d/%Y', errors='coerce')
-
         hoy = datetime.now()
         inicio_semana = hoy - timedelta(days=hoy.weekday())
-        fin_semana = inicio_semana + timedelta(days=6)
-
-        df_semana = df[(df['fecha_dt'] >= inicio_semana) & (df['fecha_dt'] <= fin_semana)]
-
+        df_semana = df[df['fecha_dt'] >= inicio_semana]
         resumen_final = []
         for uid in df_semana['uid'].unique():
             datos_uid = df_semana[df_semana['uid'] == uid]
@@ -111,13 +100,9 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pago['Nombre'] = nombre
             pago['UID'] = uid
             resumen_final.append(pago)
-
         df_resumen = pd.DataFrame(resumen_final)
         df_resumen.to_excel("resumen_semanal.xlsx", index=False)
-
         await context.bot.send_document(chat_id=update.effective_chat.id, document=open("resumen_semanal.xlsx", "rb"))
-        await update.message.reply_text("📊 Aquí tienes el resumen semanal con pagos de todos")
-
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
@@ -125,7 +110,6 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CommandHandler("resumen", resumen))
-
     print("Bot corriendo...")
     app.run_polling()
 
