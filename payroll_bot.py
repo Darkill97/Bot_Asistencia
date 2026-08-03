@@ -1,12 +1,13 @@
+import os
+import pytesseract
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
-import pytesseract
 from PIL import Image
 import pandas as pd
 from datetime import datetime, timedelta
 import io
 
-TOKEN = "PON_AQUI_EL_TOKEN_DE_BOTFATHER"
+TOKEN = os.getenv("TOKEN") # Lee el token de Render
 DB_FILE = "asistencia.xlsx"
 
 # *1. TARIFAS*
@@ -14,6 +15,9 @@ TARIFA_NORMAL = 721.17
 TARIFA_TIME_HALF = 721.17 * 1.5 # $1,081.76
 TARIFA_BH = 721.17 * 0.5 # $360.59
 HORAS_TURNO_NORMAL = 8
+
+# Para Render: usa tesseract que viene en el paquete de python
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
 
 async def leer_foto(file_path):
     img = Image.open(file_path)
@@ -29,25 +33,28 @@ async def leer_foto(file_path):
     return datos
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo_file = await update.message.photo[-1].get_file()
-    file_path = f"temp_{update.effective_user.id}.jpg"
-    await photo_file.download_to_drive(file_path)
-
-    datos = await leer_foto(file_path)
-
-    # Guardar marcación
-    df_nuevo = pd.DataFrame([datos])
     try:
-        df = pd.read_excel(DB_FILE)
-        df = pd.concat([df, df_nuevo], ignore_index=True)
-    except:
-        df = df_nuevo
-    df.to_excel(DB_FILE, index=False)
+        photo_file = await update.message.photo[-1].get_file()
+        file_path = f"temp_{update.effective_user.id}.jpg"
+        await photo_file.download_to_drive(file_path)
 
-    await update.message.reply_text(f"✅ Registrado: {datos['nombre']}\n{datos['estado']} - {datos['fecha']} {datos['hora']}")
+        datos = await leer_foto(file_path)
+        os.remove(file_path) # borra la foto temporal
+
+        # Guardar marcación
+        df_nuevo = pd.DataFrame([datos])
+        try:
+            df = pd.read_excel(DB_FILE)
+            df = pd.concat([df, df_nuevo], ignore_index=True)
+        except:
+            df = df_nuevo
+        df.to_excel(DB_FILE, index=False)
+
+        await update.message.reply_text(f"✅ Registrado: {datos['nombre']}\n{datos['estado']} - {datos['fecha']} {datos['hora']}")
+    except Exception as e:
+        await update.message.reply_text(f"Error leyendo la foto: {e}")
 
 def calcular_pago_semana(uid, df_semana):
-    # Agrupa entrada y salida del mismo día
     total_normal = 0
     total_extra = 0
     total_bh = 0
@@ -55,24 +62,25 @@ def calcular_pago_semana(uid, df_semana):
     for fecha in df_semana['fecha'].unique():
         marcaciones = df_semana[df_semana['fecha'] == fecha].sort_values('hora')
         if len(marcaciones) >= 2:
-            entrada = datetime.strptime(marcaciones.iloc[0]['hora'], '%I:%M %p')
-            salida = datetime.strptime(marcaciones.iloc[-1]['hora'], '%I:%M %p')
-            horas_trabajadas = (salida - entrada).seconds / 3600
+            try:
+                entrada = datetime.strptime(marcaciones.iloc[0]['hora'], '%I:%M %p')
+                salida = datetime.strptime(marcaciones.iloc[-1]['hora'], '%I:%M %p')
+                horas_trabajadas = (salida - entrada).seconds / 3600
 
-            if horas_trabajadas > HORAS_TURNO_NORMAL:
-                extra = horas_trabajadas - HORAS_TURNO_NORMAL
-                normal = HORAS_TURNO_NORMAL
-            else:
-                normal = horas_trabajadas
-                extra = 0
+                if horas_trabajadas > HORAS_TURNO_NORMAL:
+                    extra = horas_trabajadas - HORAS_TURNO_NORMAL
+                    normal = HORAS_TURNO_NORMAL
+                else:
+                    normal = horas_trabajadas
+                    extra = 0
 
-            # Si hay "Overtime-Out" o pasa de las 12AM, cuenta como Time&Half
-            if "Overtime" in marcaciones['estado'].values:
-                total_extra += extra
-            else:
-                total_normal += normal
+                if "Overtime" in marcaciones['estado'].values:
+                    total_extra += extra
+                else:
+                    total_normal += normal
+            except:
+                continue
 
-    # BH Premium Pay lo marcas manual con comando /bh si aplica
     pago_normal = total_normal * TARIFA_NORMAL
     pago_extra = total_extra * TARIFA_TIME_HALF
     pago_bh = total_bh * TARIFA_BH
@@ -90,9 +98,8 @@ def calcular_pago_semana(uid, df_semana):
 async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         df = pd.read_excel(DB_FILE)
-        df['fecha_dt'] = pd.to_datetime(df['fecha'])
+        df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%m/%d/%Y', errors='coerce')
 
-        # Semana actual: Lunes a Domingo
         hoy = datetime.now()
         inicio_semana = hoy - timedelta(days=hoy.weekday())
         fin_semana = inicio_semana + timedelta(days=6)
@@ -117,9 +124,13 @@ async def resumen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
 
-app = Application.builder().token(TOKEN).build()
-app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-app.add_handler(CommandHandler("resumen", resumen))
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(CommandHandler("resumen", resumen))
 
-print("Bot corriendo...")
-app.run_polling()
+    print("Bot corriendo...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
