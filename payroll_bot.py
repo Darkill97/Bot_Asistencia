@@ -16,9 +16,6 @@ TARIFA_TIME_HALF = 721.17 * 1.5 # $1,081.76
 TARIFA_BH = 721.17 * 0.5 # $360.59
 HORAS_TURNO_NORMAL = 8
 
-# Para Render: usa tesseract que viene en el paquete de python
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-
 async def leer_foto(file_path):
     img = Image.open(file_path)
     texto = pytesseract.image_to_string(img, lang='spa+eng')
